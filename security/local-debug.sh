@@ -90,14 +90,15 @@ grep -i 'immunity\|agent' "${SERVER_LOG}" | tail -20 || true
 echo "==> Crawl"
 python3 security/run_crawler.py --base-url "https://127.0.0.1:8443"
 
-echo "==> Wait for method pool upload"
-sleep 1200
+echo "==> Wait for method pool upload (4 min)"
+sleep 240
 
 echo "==> Score IAST vs OWASP Benchmark"
 export PANEL_URL="${PANEL_URL:-${IAST_SERVER_URL}}"
 export PROJECT_VERSION="${VERSION}"
 python3 "${ROOT}/security/score_iast_benchmark.py" \
   --agent-artifact "${AGENT_ARTIFACT}" \
+  --vuln-scope version \
   --output-json "${ROOT}/scorecard-iast.json" \
   --output-md "${ROOT}/scorecard-iast.md"
 

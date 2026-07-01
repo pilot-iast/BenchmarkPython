@@ -121,8 +121,8 @@ jobs:
       - name: Wait for method pool upload
         run: |
           set -euo pipefail
-          echo "Waiting 20 minutes for agent to upload method pools..."
-          sleep 1200
+          echo "Waiting 4 minutes for agent to upload method pools..."
+          sleep 240
           grep -i 'immunity\|method.pool\|upload' benchmark-server.log 2>/dev/null | tail -30 || true
 
       - name: Score IAST vs OWASP Benchmark ground truth
@@ -146,6 +146,7 @@ jobs:
           fi
           python3 security/score_iast_benchmark.py \
             --agent-artifact "${AGENT_ARTIFACT}" \
+            --vuln-scope version \
             --output-json scorecard-iast.json \
             --output-md scorecard-iast.md
           test -s scorecard-iast.json

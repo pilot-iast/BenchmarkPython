@@ -15,8 +15,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from panel_client import (
+    fetch_all_vulnerabilities,
+    fetch_panel_vulnerability_summary,
     find_project_id,
-    iter_vulnerabilities,
     list_project_agents,
     login,
     make_session,
@@ -26,6 +27,18 @@ from panel_client import (
 )
 
 TEST_RE = re.compile(r"BenchmarkTest\d{5}")
+
+# Header-only findings (CSP, X-Frame-Options, etc.) are not planted benchmark cases.
+_HEADER_VUL_NAMES = frozenset(
+    name.lower()
+    for name in (
+        "Response Without Content-Security-Policy Header",
+        "Response With X-XSS-Protection Disabled",
+        "Response With Insecurely Configured Strict-Transport-Security Header",
+        "Pages Without Anti-Clickjacking Controls",
+        "Response Without X-Content-Type-Options Header",
+    )
+)
 
 
 @dataclass
@@ -47,6 +60,40 @@ class Finding:
 
 
 @dataclass
+class CategoryScore:
+    category: str
+    expected_vulnerable: int
+    expected_safe: int
+    tp: int = 0
+    fn: int = 0
+    fp: int = 0
+    tn: int = 0
+
+    @property
+    def recall_pct(self) -> float:
+        denom = self.tp + self.fn
+        return (100.0 * self.tp / denom) if denom else 0.0
+
+    @property
+    def false_positive_rate_pct(self) -> float:
+        denom = self.fp + self.tn
+        return (100.0 * self.fp / denom) if denom else 0.0
+
+    def to_dict(self) -> dict:
+        return {
+            "category": self.category,
+            "expected_vulnerable": self.expected_vulnerable,
+            "expected_safe": self.expected_safe,
+            "tp": self.tp,
+            "fn": self.fn,
+            "fp": self.fp,
+            "tn": self.tn,
+            "recall_pct": round(self.recall_pct, 2),
+            "false_positive_rate_pct": round(self.false_positive_rate_pct, 2),
+        }
+
+
+@dataclass
 class ScoreReport:
     project_name: str
     project_version: str
@@ -55,9 +102,14 @@ class ScoreReport:
     iast_findings_total: int
     expected_vulnerable: int
     expected_safe: int
+    iast_findings_scored: int = 0
+    fetch_api: str = ""
+    fetch_pages: int = 0
     vuln_scope: str = "project"
     run_agent_ids: list[int] = field(default_factory=list)
-    run_only_findings_total: int = 0
+    panel_type_counts: list[dict] = field(default_factory=list)
+    iast_type_counts: list[dict] = field(default_factory=list)
+    by_category: list[CategoryScore] = field(default_factory=list)
     tp: int = 0
     fn: int = 0
     fp: int = 0
@@ -93,9 +145,14 @@ class ScoreReport:
             "project_id": self.project_id,
             "version_id": self.version_id,
             "iast_findings_total": self.iast_findings_total,
+            "iast_findings_scored": self.iast_findings_scored,
+            "fetch_api": self.fetch_api,
+            "fetch_pages": self.fetch_pages,
             "vuln_scope": self.vuln_scope,
             "run_agent_ids": self.run_agent_ids,
-            "run_only_findings_total": self.run_only_findings_total,
+            "panel_type_counts": self.panel_type_counts,
+            "iast_type_counts": self.iast_type_counts,
+            "by_category": [row.to_dict() for row in self.by_category],
             "expected_vulnerable": self.expected_vulnerable,
             "expected_safe": self.expected_safe,
             "tp": self.tp,
@@ -155,10 +212,21 @@ def extract_test_name(value: str) -> str | None:
     return match.group(0) if match else None
 
 
+def is_benchmark_noise(item: dict) -> bool:
+    if item.get("is_header_vul"):
+        return True
+    vul_type = str(
+        item.get("strategy__vul_name") or item.get("type") or item.get("vul_type") or ""
+    ).strip()
+    return vul_type.lower() in _HEADER_VUL_NAMES
+
+
 def collect_findings(vulns: list[dict]) -> tuple[set[str], dict[str, list[Finding]]]:
     found: set[str] = set()
     by_test: dict[str, list[Finding]] = defaultdict(list)
     for item in vulns:
+        if is_benchmark_noise(item):
+            continue
         uri = str(item.get("uri") or item.get("url") or "")
         test_name = extract_test_name(uri) or extract_test_name(str(item.get("url") or ""))
         if not test_name:
@@ -175,6 +243,56 @@ def collect_findings(vulns: list[dict]) -> tuple[set[str], dict[str, list[Findin
         found.add(test_name)
         by_test[test_name].append(finding)
     return found, by_test
+
+
+def score_category(
+    cases: dict[str, ExpectedCase],
+    found_tests: set[str],
+    findings_by_test: dict[str, list[Finding]],
+    category: str,
+) -> CategoryScore:
+    cat_cases = {name: case for name, case in cases.items() if case.category == category}
+    row = CategoryScore(
+        category=category,
+        expected_vulnerable=sum(1 for case in cat_cases.values() if case.vulnerable),
+        expected_safe=sum(1 for case in cat_cases.values() if not case.vulnerable),
+    )
+    false_negatives: list[dict] = []
+    false_positives: list[dict] = []
+
+    for name, case in sorted(cat_cases.items()):
+        detected = name in found_tests
+        if case.vulnerable and detected:
+            row.tp += 1
+        elif case.vulnerable and not detected:
+            row.fn += 1
+            false_negatives.append(
+                {
+                    "test": name,
+                    "category": case.category,
+                    "expected": "vulnerable",
+                    "endpoint": case.endpoint,
+                    "cwe": case.cwe,
+                }
+            )
+        elif not case.vulnerable and detected:
+            row.fp += 1
+            hits = findings_by_test.get(name, [])
+            false_positives.append(
+                {
+                    "test": name,
+                    "category": case.category,
+                    "expected": "safe",
+                    "endpoint": case.endpoint or (hits[0].uri if hits else ""),
+                    "cwe": case.cwe,
+                    "iast_types": sorted({h.vul_type for h in hits if h.vul_type}),
+                    "uris": sorted({h.uri for h in hits if h.uri}),
+                }
+            )
+        else:
+            row.tn += 1
+
+    return row, false_negatives, false_positives
 
 
 def score_cases(
@@ -198,39 +316,47 @@ def score_cases(
         expected_safe=sum(1 for c in cases.values() if not c.vulnerable),
     )
 
-    for name, case in sorted(cases.items()):
-        detected = name in found_tests
-        if case.vulnerable and detected:
-            report.tp += 1
-        elif case.vulnerable and not detected:
-            report.fn += 1
-            report.false_negatives.append(
-                {
-                    "test": name,
-                    "category": case.category,
-                    "expected": "vulnerable",
-                    "endpoint": case.endpoint,
-                    "cwe": case.cwe,
-                }
-            )
-        elif not case.vulnerable and detected:
-            report.fp += 1
-            hits = findings_by_test.get(name, [])
-            report.false_positives.append(
-                {
-                    "test": name,
-                    "category": case.category,
-                    "expected": "safe",
-                    "endpoint": case.endpoint or (hits[0].uri if hits else ""),
-                    "cwe": case.cwe,
-                    "iast_types": sorted({h.vul_type for h in hits if h.vul_type}),
-                    "uris": sorted({h.uri for h in hits if h.uri}),
-                }
-            )
-        else:
-            report.tn += 1
+    categories = sorted({case.category for case in cases.values()})
+    for category in categories:
+        row, fns, fps = score_category(cases, found_tests, findings_by_test, category)
+        report.by_category.append(row)
+        report.false_negatives.extend(fns)
+        report.false_positives.extend(fps)
+        report.tp += row.tp
+        report.fn += row.fn
+        report.fp += row.fp
+        report.tn += row.tn
 
     return report
+
+
+def summarize_iast_types(vulns: list[dict]) -> list[dict]:
+    counts: dict[str, int] = defaultdict(int)
+    for item in vulns:
+        if is_benchmark_noise(item):
+            continue
+        vul_type = str(
+            item.get("strategy__vul_name") or item.get("type") or item.get("vul_type") or ""
+        ).strip()
+        if vul_type:
+            counts[vul_type] += 1
+    return [
+        {"type": vul_type, "count": count}
+        for vul_type, count in sorted(counts.items(), key=lambda row: (-row[1], row[0]))
+    ]
+
+
+def summarize_panel_types(summary: dict) -> list[dict]:
+    rows = summary.get("hook_type") or []
+    return [
+        {
+            "type": str(row.get("name") or ""),
+            "count": int(row.get("num") or 0),
+            "strategy_id": row.get("id"),
+        }
+        for row in sorted(rows, key=lambda item: (-int(item.get("num") or 0), str(item.get("name") or "")))
+        if row.get("name")
+    ]
 
 
 def render_markdown(report: ScoreReport) -> str:
@@ -240,9 +366,9 @@ def render_markdown(report: ScoreReport) -> str:
         f"- **Project:** {report.project_name} (id={report.project_id})",
         f"- **Version:** {report.project_version} (id={report.version_id})",
         f"- **IAST findings (raw):** {report.iast_findings_total} "
-        f"(scope={report.vuln_scope})",
-        f"- **Run-only findings (version agent filter):** {report.run_only_findings_total} "
-        f"(agents={report.run_agent_ids or 'none'})",
+        f"(scope={report.vuln_scope}, api={report.fetch_api or 'unknown'}, pages={report.fetch_pages})",
+        f"- **IAST findings (scored, excl. header noise):** {report.iast_findings_scored}",
+        f"- **Run agents:** {report.run_agent_ids or 'none'}",
         "",
         "## Summary",
         "",
@@ -260,6 +386,49 @@ def render_markdown(report: ScoreReport) -> str:
         f"| F1 | {report.f1_score:.4f} |",
         "",
     ]
+
+    if report.panel_type_counts:
+        lines.extend(
+            [
+                "## Panel vulnerability types (raw counts from UI API)",
+                "",
+                "| IAST type | Count |",
+                "| --- | ---: |",
+            ]
+        )
+        for row in report.panel_type_counts:
+            lines.append(f"| {row['type']} | {row['count']} |")
+        lines.append("")
+
+    if report.iast_type_counts:
+        lines.extend(
+            [
+                "## Scored findings by IAST type (excl. header noise, mapped to benchmark tests)",
+                "",
+                "| IAST type | Findings |",
+                "| --- | ---: |",
+            ]
+        )
+        for row in report.iast_type_counts:
+            lines.append(f"| {row['type']} | {row['count']} |")
+        lines.append("")
+
+    if report.by_category:
+        lines.extend(
+            [
+                "## Score by benchmark category",
+                "",
+                "| Category | Vuln tests | Safe tests | TP | FN | FP | TN | Recall | FP rate |",
+                "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+            ]
+        )
+        for row in report.by_category:
+            lines.append(
+                f"| {row.category} | {row.expected_vulnerable} | {row.expected_safe} | "
+                f"{row.tp} | {row.fn} | {row.fp} | {row.tn} | "
+                f"{row.recall_pct:.2f}% | {row.false_positive_rate_pct:.2f}% |"
+            )
+        lines.append("")
 
     def append_section(title: str, items: list[dict]) -> None:
         lines.append(f"## {title} ({len(items)})")
@@ -291,8 +460,8 @@ def fetch_panel_vulnerabilities(
     project_name: str,
     version_name: str,
     *,
-    scope: str = "project",
-) -> tuple[int, int, str, list[dict], list[int], int]:
+    scope: str = "version",
+) -> tuple[int, int, str, list[dict], list[int], dict, dict]:
     session = make_session(panel_url)
     login(session, panel_url, user, password)
     project_id = find_project_id(session, panel_url, project_name)
@@ -301,25 +470,16 @@ def fetch_panel_vulnerabilities(
     )
     agents = list_project_agents(session, panel_url, project_id)
     run_agent_ids = resolve_run_agent_ids(agents, version_id)
-    run_only = list(
-        iter_vulnerabilities(
-            session,
-            panel_url,
-            project_id,
-            version_id,
-            project_name=project_name,
-            scope="version",
-        )
+    vulns, fetch_meta = fetch_all_vulnerabilities(
+        session,
+        panel_url,
+        project_id,
+        version_id,
+        project_name=project_name,
+        scope=scope,
     )
-    vulns = list(
-        iter_vulnerabilities(
-            session,
-            panel_url,
-            project_id,
-            version_id,
-            project_name=project_name,
-            scope=scope,
-        )
+    panel_summary = fetch_panel_vulnerability_summary(
+        session, panel_url, project_id, version_id
     )
     return (
         project_id,
@@ -327,7 +487,8 @@ def fetch_panel_vulnerabilities(
         resolved_version,
         vulns,
         run_agent_ids,
-        len(run_only),
+        fetch_meta,
+        panel_summary,
     )
 
 
@@ -357,8 +518,8 @@ def main() -> int:
     parser.add_argument(
         "--vuln-scope",
         choices=("project", "version"),
-        default="project",
-        help="project=all deduplicated findings for the app; version=only agents of this run",
+        default="version",
+        help="version=agents of this run (default); project=all agents ever bound to the app",
     )
     parser.add_argument("--output-json", default="scorecard-iast.json")
     parser.add_argument("--output-md", default="scorecard-iast.md")
@@ -399,7 +560,8 @@ def main() -> int:
         resolved_version,
         vulns,
         run_agent_ids,
-        run_only_total,
+        fetch_meta,
+        panel_summary,
     ) = fetch_panel_vulnerabilities(
         panel_url,
         user,
@@ -409,9 +571,12 @@ def main() -> int:
         scope=args.vuln_scope,
     )
     found_tests, findings_by_test = collect_findings(vulns)
+    scored_total = sum(len(items) for items in findings_by_test.values())
     print(
         f"Fetched {len(vulns)} IAST findings for version {resolved_version!r} "
-        f"(scope={args.vuln_scope}, run-only={run_only_total}, agents={run_agent_ids})"
+        f"(scope={args.vuln_scope}, api={fetch_meta.get('api')}, "
+        f"pages={fetch_meta.get('pages_fetched')}, scored={scored_total}, "
+        f"agents={run_agent_ids})"
     )
     report = score_cases(
         cases,
@@ -423,9 +588,13 @@ def main() -> int:
         version_id=version_id,
         iast_findings_total=len(vulns),
     )
+    report.iast_findings_scored = scored_total
+    report.fetch_api = str(fetch_meta.get("api") or "")
+    report.fetch_pages = int(fetch_meta.get("pages_fetched") or 0)
     report.vuln_scope = args.vuln_scope
     report.run_agent_ids = run_agent_ids
-    report.run_only_findings_total = run_only_total
+    report.panel_type_counts = summarize_panel_types(panel_summary)
+    report.iast_type_counts = summarize_iast_types(vulns)
 
     payload = report.to_dict()
     Path(args.output_json).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

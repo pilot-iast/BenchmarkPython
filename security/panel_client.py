@@ -146,18 +146,33 @@ def list_project_agents(
     base_url: str,
     project_id: int,
     *,
-    page_size: int = 100,
+    page_size: int = 50,
 ) -> list[dict]:
-    """List agents bound to a project (v1 API)."""
+    """List agents bound to a project (v1 API, paginated)."""
     root = base_url.rstrip("/")
-    resp = session.get(
-        f"{root}/api/v1/agents",
-        params={"bind_project_id": project_id, "pageSize": page_size},
-        timeout=30,
-    )
-    resp.raise_for_status()
-    body = _check_api_response(resp, "agent list")
-    return list(body.get("data") or [])
+    agents: list[dict] = []
+    page = 1
+    while True:
+        resp = session.get(
+            f"{root}/api/v1/agents",
+            params={"bind_project_id": project_id, "page": page, "pageSize": page_size},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        body = _check_api_response(resp, "agent list")
+        items = list(body.get("data") or [])
+        if not items:
+            break
+        agents.extend(items)
+        page_meta = body.get("page") or {}
+        num_pages = int(page_meta.get("num_pages") or 0)
+        if num_pages:
+            if page >= num_pages:
+                break
+        elif len(items) < page_size:
+            break
+        page += 1
+    return agents
 
 
 def resolve_run_agent_ids(agents: list[dict], version_id: int) -> list[int]:
@@ -175,19 +190,96 @@ def resolve_run_agent_ids(agents: list[dict], version_id: int) -> list[int]:
     return []
 
 
-def iter_vulnerabilities(
+def normalize_vuln_record(item: dict) -> dict:
+    """Unify v1/v2 vulnerability payloads for the scorecard."""
+    uri = str(item.get("uri") or "")
+    url = str(item.get("url") or "")
+    if not uri and url:
+        from urllib.parse import urlparse
+
+        uri = urlparse(url).path or url
+    vul_type = str(
+        item.get("strategy__vul_name") or item.get("type") or item.get("vul_type") or ""
+    )
+    is_header = item.get("is_header_vul")
+    if isinstance(is_header, str):
+        is_header = is_header.lower() in ("1", "true", "yes")
+    return {
+        **item,
+        "uri": uri,
+        "url": url or uri,
+        "type": vul_type,
+        "strategy__vul_name": vul_type,
+        "is_header_vul": bool(is_header),
+        "http_method": str(item.get("http_method") or ""),
+    }
+
+
+def _fetch_vulnerabilities_v2(
+    session: requests.Session,
+    base_url: str,
+    project_id: int,
+    version_id: int,
+    *,
+    page_size: int = 500,
+) -> tuple[list[dict], dict]:
+    """Panel UI list API — no hard 50-item cap on page_size."""
+    root = base_url.rstrip("/")
+    headers = csrf_headers(session)
+    vulns: list[dict] = []
+    page = 1
+    while True:
+        payload = {
+            "bind_project_id": project_id,
+            "project_version_id": version_id,
+            "page": page,
+            "page_size": page_size,
+            "order_type": 0,
+            "order_type_desc": 0,
+        }
+        resp = session.post(
+            f"{root}/api/v2/app_vul_list_content",
+            json=payload,
+            headers=headers,
+            timeout=120,
+        )
+        resp.raise_for_status()
+        body = _check_api_response(resp, "v2 vulnerability list")
+        data = body.get("data") or {}
+        if isinstance(data, list):
+            items = data
+        else:
+            items = data.get("messages") or []
+        if not items:
+            break
+        vulns.extend(normalize_vuln_record(item) for item in items)
+        if len(items) < page_size:
+            break
+        page += 1
+    meta = {
+        "api": "v2/app_vul_list_content",
+        "pages_fetched": page,
+        "page_size": page_size,
+    }
+    return vulns, meta
+
+
+def _fetch_vulnerabilities_v1(
     session: requests.Session,
     base_url: str,
     project_id: int,
     version_id: int,
     *,
     project_name: str = "",
-    scope: str = "project",
-    page_size: int = 200,
-) -> Iterator[dict]:
-    """Fetch vulnerabilities via GET /api/v1/vulns."""
+    scope: str = "version",
+    page_size: int = 50,
+) -> tuple[list[dict], dict]:
+    """Legacy GET /api/v1/vulns — server caps pageSize at 50, fetch every page."""
     root = base_url.rstrip("/")
+    vulns: list[dict] = []
     page = 1
+    total = 0
+    num_pages = 0
     while True:
         params: dict[str, int | str] = {
             "page": page,
@@ -205,14 +297,126 @@ def iter_vulnerabilities(
             timeout=120,
         )
         resp.raise_for_status()
-        body = _check_api_response(resp, "vulnerability list")
+        body = _check_api_response(resp, "v1 vulnerability list")
         items = body.get("data") or []
         if not items:
             break
-        yield from items
-        if len(items) < page_size:
+        vulns.extend(normalize_vuln_record(item) for item in items)
+        page_meta = body.get("page") or {}
+        total = int(page_meta.get("alltotal") or total or len(vulns))
+        num_pages = int(page_meta.get("num_pages") or num_pages or 0)
+        if num_pages:
+            if page >= num_pages:
+                break
+        elif len(items) < page_size:
             break
         page += 1
+    meta = {
+        "api": "v1/vulns",
+        "pages_fetched": page,
+        "page_size": page_size,
+        "alltotal": total,
+        "num_pages": num_pages,
+    }
+    return vulns, meta
+
+
+def fetch_panel_vulnerability_summary(
+    session: requests.Session,
+    base_url: str,
+    project_id: int,
+    version_id: int,
+) -> dict:
+    """Aggregate counts by IAST strategy type (same filters as the panel UI)."""
+    root = base_url.rstrip("/")
+    resp = session.post(
+        f"{root}/api/v2/app_vul_summary",
+        json={
+            "bind_project_id": project_id,
+            "project_version_id": version_id,
+            "page": 1,
+            "page_size": 1,
+        },
+        headers=csrf_headers(session),
+        timeout=60,
+    )
+    resp.raise_for_status()
+    body = _check_api_response(resp, "v2 vulnerability summary")
+    data = body.get("data") or {}
+    messages = data.get("messages") if isinstance(data, dict) else data
+    if isinstance(messages, dict):
+        return messages
+    return {}
+
+
+def fetch_all_vulnerabilities(
+    session: requests.Session,
+    base_url: str,
+    project_id: int,
+    version_id: int,
+    *,
+    project_name: str = "",
+    scope: str = "version",
+) -> tuple[list[dict], dict]:
+    """
+    Fetch every vulnerability for a project version.
+
+    Prefer the v2 UI endpoint (large pages). Fall back to v1 with full pagination.
+    """
+    if scope == "version":
+        try:
+            vulns, meta = _fetch_vulnerabilities_v2(
+                session, base_url, project_id, version_id
+            )
+            if vulns:
+                meta["scope"] = scope
+                return vulns, meta
+        except RuntimeError as exc:
+            print(f"WARNING: v2 vulnerability fetch failed ({exc}); falling back to v1")
+
+    vulns, meta = _fetch_vulnerabilities_v1(
+        session,
+        base_url,
+        project_id,
+        version_id,
+        project_name=project_name,
+        scope=scope,
+    )
+    meta["scope"] = scope
+    return vulns, meta
+
+
+def iter_vulnerabilities(
+    session: requests.Session,
+    base_url: str,
+    project_id: int,
+    version_id: int,
+    *,
+    project_name: str = "",
+    scope: str = "project",
+    page_size: int = 50,
+) -> Iterator[dict]:
+    """Backward-compatible iterator; loads all pages then yields."""
+    if scope == "version":
+        vulns, _ = fetch_all_vulnerabilities(
+            session,
+            base_url,
+            project_id,
+            version_id,
+            project_name=project_name,
+            scope=scope,
+        )
+    else:
+        vulns, _ = _fetch_vulnerabilities_v1(
+            session,
+            base_url,
+            project_id,
+            version_id,
+            project_name=project_name,
+            scope=scope,
+            page_size=page_size,
+        )
+    yield from vulns
 
 
 def _flatten_config(config: dict) -> dict[str, str]:
