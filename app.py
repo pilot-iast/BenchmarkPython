@@ -32,8 +32,11 @@ for test in test_files:
 		testmod.init(app)
 
 
+@app.route('/benchmark/')
 @app.route('/benchmark/<path:mypath>')
-def show_page(mypath: str):
+def show_page(mypath: str = ""):
+	if not mypath:
+		return redirect("/benchmark/Index.html")
 	if mypath.endswith(".html") and not mypath.endswith("404.html"):
 		return render_template(f"web/{mypath}")
 	else:

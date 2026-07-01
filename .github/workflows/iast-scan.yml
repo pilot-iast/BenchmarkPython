@@ -76,12 +76,22 @@ jobs:
       - name: Wait for application
         run: |
           set -euo pipefail
-          for attempt in $(seq 1 60); do
-            if curl -kfsS https://127.0.0.1:8443/benchmark/ >/dev/null 2>&1; then
+          for attempt in $(seq 1 90); do
+            if ! kill -0 "$(cat benchmark-server.pid)" 2>/dev/null; then
+              echo "Flask process exited before becoming ready" >&2
+              tail -n 200 benchmark-server.log || true
+              exit 1
+            fi
+            # /benchmark/ returns 404 on Flask; use a route that always returns 200.
+            if curl -kfsS "https://127.0.0.1:8443/redirected" >/dev/null 2>&1; then
               echo "Benchmark is up after ${attempt} attempt(s)"
               exit 0
             fi
-            echo "Waiting for Benchmark... (${attempt}/60)"
+            if [ $((attempt % 6)) -eq 0 ]; then
+              echo "Still loading (imports + agent hook can take several minutes)..."
+              tail -n 5 benchmark-server.log 2>/dev/null || true
+            fi
+            echo "Waiting for Benchmark... (${attempt}/90)"
             sleep 10
           done
           echo "Application did not become ready in time" >&2

@@ -68,15 +68,20 @@ nohup flask --app app.py run --port 8443 --cert=adhoc --host=127.0.0.1 \
 echo $! > "${SERVER_PID}"
 
 echo "==> Wait for Benchmark"
-for attempt in $(seq 1 60); do
-  if curl -kfsS "${BENCHMARK_BASE_URL}/" >/dev/null 2>&1; then
+for attempt in $(seq 1 90); do
+  if ! kill -0 "$(cat "$SERVER_PID")" 2>/dev/null; then
+    echo "Flask process exited before becoming ready" >&2
+    tail -n 200 "$SERVER_LOG" || true
+    exit 1
+  fi
+  if curl -kfsS "https://127.0.0.1:8443/redirected" >/dev/null 2>&1; then
     echo "Benchmark up after ${attempt} attempt(s)"
     break
   fi
-  echo "  waiting... (${attempt}/60)"
+  echo "  waiting... (${attempt}/90)"
   sleep 10
 done
-curl -kfsS "${BENCHMARK_BASE_URL}/" >/dev/null
+curl -kfsS "https://127.0.0.1:8443/redirected" >/dev/null
 
 echo "==> Agent started; wait 30s for panel registration"
 sleep 30
