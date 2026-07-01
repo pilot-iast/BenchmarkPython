@@ -114,7 +114,9 @@ jobs:
           set -euo pipefail
           # shellcheck disable=SC1091
           source venv/bin/activate
-          python3 security/run_crawler.py --base-url "https://127.0.0.1:8443"
+          python3 security/run_crawler.py \
+            --base-url "https://127.0.0.1:8443" \
+            --failed-log crawl-failures.tsv
 
       - name: Wait for method pool upload
         run: |
@@ -165,6 +167,7 @@ jobs:
           name: iast-scan-logs
           path: |
             benchmark-server.log
+            crawl-failures.tsv
 
       - name: Stop Benchmark server
         if: always()

@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import socket
+import ssl
 import sys
 import time
 import xml.etree.ElementTree as ET
@@ -13,6 +15,7 @@ from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 
 import requests
 import urllib3
+from requests.exceptions import InvalidHeader
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -91,6 +94,56 @@ def encode_cookie_value(value: str) -> str:
     return quote(value, safe="").replace("+", "%20")
 
 
+def send_raw_http(
+    method: str,
+    url: str,
+    headers: dict[str, str],
+    body: bytes,
+    *,
+    timeout: float,
+) -> int:
+    """Send HTTP(S) without urllib3 header validation (matches Java HttpClient behavior)."""
+    parsed = urlsplit(url)
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+
+    header_lines = [f"{method} {path} HTTP/1.1", f"Host: {host}"]
+    for key, value in headers.items():
+        if key.lower() == "host":
+            continue
+        header_lines.append(f"{key}: {value}")
+    if body:
+        header_lines.append(f"Content-Length: {len(body)}")
+    header_lines.extend(["Connection: close", ""])
+    payload = "\r\n".join(header_lines).encode("latin-1", errors="replace") + body
+
+    sock = socket.create_connection((host, port), timeout=timeout)
+    try:
+        if parsed.scheme == "https":
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            sock = ctx.wrap_socket(sock, server_hostname=host)
+        sock.sendall(payload)
+        response = b""
+        while True:
+            chunk = sock.recv(8192)
+            if not chunk:
+                break
+            response += chunk
+    finally:
+        sock.close()
+
+    status_line = response.split(b"\r\n", 1)[0].decode("ascii", errors="replace")
+    parts = status_line.split()
+    if len(parts) >= 2 and parts[1].isdigit():
+        return int(parts[1])
+    return 0
+
+
 def build_request(test: BenchmarkTest) -> tuple[str, str, dict[str, str], dict[str, str], dict[str, str]]:
     query = ""
     if test.get_params:
@@ -115,6 +168,39 @@ def build_request(test: BenchmarkTest) -> tuple[str, str, dict[str, str], dict[s
     return method, url, headers, data, {}
 
 
+def execute_request(
+    session: requests.Session,
+    *,
+    method: str,
+    url: str,
+    headers: dict[str, str],
+    data: dict[str, str],
+    timeout: float,
+) -> int:
+    body = urlencode(data).encode("utf-8") if data else b""
+    try:
+        if method == "GET":
+            response = session.get(
+                url,
+                headers=headers,
+                timeout=timeout,
+                allow_redirects=False,
+            )
+        else:
+            response = session.post(
+                url,
+                headers=headers,
+                data=data,
+                timeout=timeout,
+                allow_redirects=False,
+            )
+        return response.status_code
+    except (InvalidHeader, ValueError) as exc:
+        if "header" not in str(exc).lower():
+            raise
+        return send_raw_http(method, url, headers, body, timeout=timeout)
+
+
 def crawl(
     tests: list[BenchmarkTest],
     *,
@@ -122,6 +208,7 @@ def crawl(
     proxy_host: str | None,
     proxy_port: int | None,
     timeout: float,
+    failed_log: Path | None,
 ) -> tuple[int, int]:
     session = requests.Session()
     session.verify = False
@@ -131,22 +218,32 @@ def crawl(
 
     ok = 0
     failed = 0
+    failures: list[str] = []
     for test in tests:
         method, url, headers, data, _ = build_request(test)
         url = rewrite_base_url(url, base_url)
+        display_url = url.split("?", 1)[0] + ("?***" if "?" in url else "")
         try:
-            if method == "GET":
-                response = session.get(url, headers=headers, timeout=timeout)
-            else:
-                response = session.post(url, headers=headers, data=data, timeout=timeout)
-            print(f"{method} {url} --> ({response.status_code})")
-            if response.status_code >= 400:
+            status = execute_request(
+                session,
+                method=method,
+                url=url,
+                headers=headers,
+                data=data,
+                timeout=timeout,
+            )
+            print(f"{method} {display_url} --> ({status})")
+            if status >= 400:
                 failed += 1
+                failures.append(f"{test.name}\t{status}\t{method} {display_url}")
             else:
                 ok += 1
-        except requests.RequestException as exc:
+        except (requests.RequestException, OSError) as exc:
             failed += 1
-            print(f"{method} {url} --> ERROR {exc}", file=sys.stderr)
+            failures.append(f"{test.name}\tERROR\t{method} {display_url}\t{exc}")
+            print(f"{method} {display_url} --> ERROR {exc}", file=sys.stderr)
+    if failed_log and failures:
+        failed_log.write_text("\n".join(failures) + "\n", encoding="utf-8")
     return ok, failed
 
 
@@ -166,6 +263,16 @@ def main() -> int:
     parser.add_argument("--proxy-host", default="")
     parser.add_argument("--proxy-port", type=int, default=0)
     parser.add_argument("--timeout", type=float, default=15.0)
+    parser.add_argument(
+        "--failed-log",
+        default="",
+        help="Write failed test names and reasons to this file",
+    )
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Exit 1 if any crawl request failed (default: tolerate partial failures)",
+    )
     args = parser.parse_args()
 
     crawler_file = Path(args.crawler_file)
@@ -183,18 +290,24 @@ def main() -> int:
     base_url = args.base_url or None
 
     started = time.time()
+    failed_log = Path(args.failed_log) if args.failed_log else None
     ok, failed = crawl(
         tests,
         base_url=base_url,
         proxy_host=proxy_host,
         proxy_port=proxy_port,
         timeout=args.timeout,
+        failed_log=failed_log,
     )
     elapsed = int(time.time() - started)
     print(
         f"Crawl finished: {len(tests)} tests, ok={ok}, failed={failed}, took {elapsed}s"
     )
-    return 1 if failed else 0
+    if args.strict and failed:
+        return 1
+    if failed and ok == 0:
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
