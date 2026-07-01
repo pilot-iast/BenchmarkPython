@@ -1,0 +1,180 @@
+name: IAST scan
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  iast-crawl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: zulu
+          cache: maven
+
+      - name: Download IAST Python agent
+        env:
+          IAST_SERVER_URL: ${{ secrets.IAST_SERVER_URL }}
+          IAST_TOKEN: ${{ secrets.IAST_TOKEN }}
+          IAST_PROJECT_NAME: ${{ vars.IAST_PROJECT_NAME }}
+          IAST_TEMPLATE_ID: ${{ vars.IAST_TEMPLATE_ID }}
+          IAST_PY_TAG: ${{ vars.IAST_PY_TAG }}
+          IAST_PLATFORM: ${{ vars.IAST_PLATFORM }}
+          PROJECT_VERSION: run-${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          test -n "${IAST_SERVER_URL:-}" || { echo "IAST_SERVER_URL secret is required"; exit 1; }
+          test -n "${IAST_TOKEN:-}" || { echo "IAST_TOKEN secret is required"; exit 1; }
+          server="${IAST_SERVER_URL%/}"
+          project="${IAST_PROJECT_NAME:-benchmarkpython}"
+          template_id="${IAST_TEMPLATE_ID:-2}"
+          py_tag="${IAST_PY_TAG:-cp312}"
+          platform="${IAST_PLATFORM:-manylinux_2_28_x86_64}"
+          version="${PROJECT_VERSION}"
+          echo "PROJECT_VERSION=${version}" >> "${GITHUB_ENV}"
+          echo "IAST_PROJECT_NAME=${project}" >> "${GITHUB_ENV}"
+          mkdir -p iast-tool
+          curl -fsSk -G \
+            -H "Authorization: Token ${IAST_TOKEN}" \
+            --data-urlencode "url=${server}" \
+            --data-urlencode "language=python" \
+            --data-urlencode "projectName=${project}" \
+            --data-urlencode "projectVersion=${version}" \
+            --data-urlencode "template_id=${template_id}" \
+            --data-urlencode "py=${py_tag}" \
+            --data-urlencode "platform=${platform}" \
+            "${server}/api/v1/agent/download" \
+            -o iast-tool/agent.whl
+          ls -lh iast-tool/agent.whl
+          test -s iast-tool/agent.whl
+          python3 -c "
+          import json, zipfile
+          z = zipfile.ZipFile('iast-tool/agent.whl')
+          cfg = [n for n in z.namelist() if n.endswith('config.json')][0]
+          print(json.dumps(json.loads(z.read(cfg)), indent=2))
+          "
+
+      - name: Install OWASP BenchmarkUtils crawler plugin
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/OWASP-Benchmark/BenchmarkUtils.git /tmp/BenchmarkUtils
+          mvn -f /tmp/BenchmarkUtils/pom.xml install -DskipTests -q
+
+      - name: Start Benchmark with IAST agent
+        run: |
+          set -euo pipefail
+          python3 -m venv venv
+          # shellcheck disable=SC1091
+          source venv/bin/activate
+          pip install -q -r requirements.txt
+          pip install -q ./iast-tool/agent.whl
+          export IMMUNITY_IAST=1
+          nohup flask --app app.py run --port 8443 --cert=adhoc --host=127.0.0.1 \
+            > benchmark-server.log 2>&1 &
+          echo $! > benchmark-server.pid
+          echo "Started Flask (pid $(cat benchmark-server.pid))"
+
+      - name: Wait for application
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 60); do
+            if curl -kfsS https://127.0.0.1:8443/benchmark/ >/dev/null 2>&1; then
+              echo "Benchmark is up after ${attempt} attempt(s)"
+              exit 0
+            fi
+            echo "Waiting for Benchmark... (${attempt}/60)"
+            sleep 10
+          done
+          echo "Application did not become ready in time" >&2
+          tail -n 200 benchmark-server.log || true
+          exit 1
+
+      - name: Verify IAST agent started
+        run: |
+          set -euo pipefail
+          test -s iast-tool/agent.whl
+          if ! grep -qi 'immunity\|python.agent\|ImmunityFlaskMiddleware' benchmark-server.log; then
+            echo "WARNING: no obvious agent log lines yet; continuing"
+          fi
+          echo "Giving agent 30s to register with panel..."
+          sleep 30
+          tail -n 50 benchmark-server.log || true
+
+      - name: Run OWASP Benchmark crawler
+        run: |
+          set -euo pipefail
+          ./runCrawler.sh
+
+      - name: Wait for method pool upload
+        run: |
+          set -euo pipefail
+          echo "Waiting 20 minutes for agent to upload method pools..."
+          sleep 1200
+          grep -i 'immunity\|method.pool\|upload' benchmark-server.log 2>/dev/null | tail -30 || true
+
+      - name: Score IAST vs OWASP Benchmark ground truth
+        env:
+          PANEL_URL: ${{ secrets.PANEL_URL }}
+          PANEL_USER: ${{ secrets.PANEL_USER }}
+          PANEL_PASS: ${{ secrets.PANEL_PASS }}
+          IAST_SERVER_URL: ${{ secrets.IAST_SERVER_URL }}
+          IAST_PROJECT_NAME: ${{ env.IAST_PROJECT_NAME }}
+          PROJECT_VERSION: ${{ env.PROJECT_VERSION }}
+          PANEL_VERIFY_SSL: "false"
+        run: |
+          set -euo pipefail
+          export PANEL_URL="${PANEL_URL:-${IAST_SERVER_URL:-}}"
+          export IAST_PROJECT_NAME="${IAST_PROJECT_NAME:-benchmarkpython}"
+          if [ -z "${PANEL_URL:-}" ] || [ -z "${PANEL_USER:-}" ] || [ -z "${PANEL_PASS:-}" ]; then
+            echo "PANEL_URL (or IAST_SERVER_URL), PANEL_USER, PANEL_PASS are required for scorecard" >&2
+            exit 1
+          fi
+          python3 -m pip install -q -r security/requirements.txt
+          python3 security/score_iast_benchmark.py \
+            --output-json scorecard-iast.json \
+            --output-md scorecard-iast.md
+          test -s scorecard-iast.json
+          test -s scorecard-iast.md
+
+      - name: Upload scorecard
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scorecard-iast
+          path: |
+            scorecard-iast.json
+            scorecard-iast.md
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: iast-scan-logs
+          path: |
+            benchmark-server.log
+
+      - name: Stop Benchmark server
+        if: always()
+        run: |
+          if [ -f benchmark-server.pid ]; then
+            kill "$(cat benchmark-server.pid)" 2>/dev/null || true
+          fi
+          pkill -f 'flask --app app.py' 2>/dev/null || true
+
+      - name: Show application logs on failure
+        if: failure()
+        run: |
+          tail -n 200 benchmark-server.log 2>/dev/null || true

@@ -4,6 +4,11 @@
 notallowed
 testfiles/
 venv/
+iast-tool/
+scorecard-iast.json
+scorecard-iast.md
+benchmark-server.log
+benchmark-server.pid
 
 # codeql db
 benchmark-py/

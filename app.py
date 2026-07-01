@@ -32,7 +32,6 @@ for test in test_files:
 		testmod.init(app)
 
 
-
 @app.route('/benchmark/<path:mypath>')
 def show_page(mypath: str):
 	if mypath.endswith(".html") and not mypath.endswith("404.html"):
@@ -47,6 +46,10 @@ def default_page():
 @app.route('/redirected')
 def redirected():
 	return 'you\'ve been pwned'
+
+if os.environ.get('IMMUNITY_IAST', '').lower() in ('1', 'true', 'yes'):
+	from immunity_python_agent.middlewares.flask_middleware import ImmunityFlaskMiddleware
+	app.wsgi_app = ImmunityFlaskMiddleware(app.wsgi_app, app)
 
 if __name__ == '__main__':
 	app.run()
