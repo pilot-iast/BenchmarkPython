@@ -51,12 +51,6 @@ curl -fsSk -G \
 test -s "${AGENT_WHL}"
 python3 -c "import zipfile, json; z=zipfile.ZipFile('${AGENT_WHL}'); cfg=[n for n in z.namelist() if n.endswith('config.json')][0]; print(json.loads(z.read(cfg)))"
 
-echo "==> Install BenchmarkUtils crawler plugin (if missing)"
-if ! mvn -Dplugin=org.owasp:benchmarkutils-maven-plugin help:describe >/dev/null 2>&1; then
-  git clone --depth 1 https://github.com/OWASP-Benchmark/BenchmarkUtils.git /tmp/BenchmarkUtils
-  mvn -f /tmp/BenchmarkUtils/pom.xml install -DskipTests -q
-fi
-
 echo "==> Prepare venv and install agent"
 cd "${ROOT}"
 if [[ ! -d venv ]]; then
@@ -65,6 +59,7 @@ fi
 # shellcheck disable=SC1091
 source venv/bin/activate
 pip install -q -r requirements.txt
+pip install -q -r security/requirements.txt
 pip install -q "${AGENT_WHL}"
 
 echo "==> Start Benchmark with Immunity Python agent"
@@ -89,7 +84,7 @@ sleep 30
 grep -i 'immunity\|agent' "${SERVER_LOG}" | tail -20 || true
 
 echo "==> Crawl"
-./runCrawler.sh
+python3 security/run_crawler.py --base-url "https://127.0.0.1:8443"
 
 echo "==> Wait for method pool upload"
 sleep 1200
@@ -97,7 +92,6 @@ sleep 1200
 echo "==> Score IAST vs OWASP Benchmark"
 export PANEL_URL="${PANEL_URL:-${IAST_SERVER_URL}}"
 export PROJECT_VERSION="${VERSION}"
-python3 -m pip install -q -r "${ROOT}/security/requirements.txt"
 python3 "${ROOT}/security/score_iast_benchmark.py" \
   --output-json "${ROOT}/scorecard-iast.json" \
   --output-md "${ROOT}/scorecard-iast.md"

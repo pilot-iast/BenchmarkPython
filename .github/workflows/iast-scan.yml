@@ -17,13 +17,10 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          java-version: "17"
-          distribution: zulu
-          cache: maven
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            security/requirements.txt
 
       - name: Download IAST Python agent
         env:
@@ -67,20 +64,20 @@ jobs:
           print(json.dumps(json.loads(z.read(cfg)), indent=2))
           "
 
-      - name: Install OWASP BenchmarkUtils crawler plugin
-        run: |
-          set -euo pipefail
-          git clone --depth 1 https://github.com/OWASP-Benchmark/BenchmarkUtils.git /tmp/BenchmarkUtils
-          mvn -f /tmp/BenchmarkUtils/pom.xml install -DskipTests -q
-
-      - name: Start Benchmark with IAST agent
+      - name: Install Python dependencies
         run: |
           set -euo pipefail
           python3 -m venv venv
           # shellcheck disable=SC1091
           source venv/bin/activate
-          pip install -q -r requirements.txt
+          pip install -q -r requirements.txt -r security/requirements.txt
           pip install -q ./iast-tool/agent.whl
+
+      - name: Start Benchmark with IAST agent
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1091
+          source venv/bin/activate
           export IMMUNITY_IAST=1
           nohup flask --app app.py run --port 8443 --cert=adhoc --host=127.0.0.1 \
             > benchmark-server.log 2>&1 &
@@ -116,7 +113,9 @@ jobs:
       - name: Run OWASP Benchmark crawler
         run: |
           set -euo pipefail
-          ./runCrawler.sh
+          # shellcheck disable=SC1091
+          source venv/bin/activate
+          python3 security/run_crawler.py --base-url "https://127.0.0.1:8443"
 
       - name: Wait for method pool upload
         run: |
@@ -136,13 +135,14 @@ jobs:
           PANEL_VERIFY_SSL: "false"
         run: |
           set -euo pipefail
+          # shellcheck disable=SC1091
+          source venv/bin/activate
           export PANEL_URL="${PANEL_URL:-${IAST_SERVER_URL:-}}"
           export IAST_PROJECT_NAME="${IAST_PROJECT_NAME:-benchmarkpython}"
           if [ -z "${PANEL_URL:-}" ] || [ -z "${PANEL_USER:-}" ] || [ -z "${PANEL_PASS:-}" ]; then
             echo "PANEL_URL (or IAST_SERVER_URL), PANEL_USER, PANEL_PASS are required for scorecard" >&2
             exit 1
           fi
-          python3 -m pip install -q -r security/requirements.txt
           python3 security/score_iast_benchmark.py \
             --output-json scorecard-iast.json \
             --output-md scorecard-iast.md
