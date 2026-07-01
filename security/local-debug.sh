@@ -4,7 +4,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ENV_FILE="${ROOT}/security/.env.local"
-AGENT_WHL="${ROOT}/iast-tool/agent.whl"
+AGENT_DIR="${ROOT}/iast-tool"
 SERVER_LOG="${ROOT}/benchmark-server.log"
 SERVER_PID="${ROOT}/benchmark-server.pid"
 
@@ -36,20 +36,19 @@ cleanup() {
 trap cleanup EXIT
 
 echo "==> Download Python agent (${SERVER}, project=${IAST_PROJECT_NAME}, version=${VERSION})"
-mkdir -p "${ROOT}/iast-tool"
-curl -fsSk -G \
-  -H "Authorization: Token ${IAST_TOKEN}" \
-  --data-urlencode "url=${SERVER}" \
-  --data-urlencode "language=python" \
-  --data-urlencode "projectName=${IAST_PROJECT_NAME}" \
-  --data-urlencode "projectVersion=${VERSION}" \
-  --data-urlencode "template_id=${IAST_TEMPLATE_ID}" \
-  --data-urlencode "py=${IAST_PY_TAG}" \
-  --data-urlencode "platform=${IAST_PLATFORM}" \
-  "${SERVER}/api/v1/agent/download" \
-  -o "${AGENT_WHL}"
-test -s "${AGENT_WHL}"
-python3 -c "import zipfile, json; z=zipfile.ZipFile('${AGENT_WHL}'); cfg=[n for n in z.namelist() if n.endswith('config.json')][0]; print(json.loads(z.read(cfg)))"
+export PROJECT_VERSION="${VERSION}"
+AGENT_ARTIFACT="$(python3 "${ROOT}/security/download_agent.py" \
+  --server "${SERVER}" \
+  --token "${IAST_TOKEN}" \
+  --out-dir "${AGENT_DIR}" \
+  --project-name "${IAST_PROJECT_NAME}" \
+  --project-version "${VERSION}" \
+  --template-id "${IAST_TEMPLATE_ID}" \
+  --py-tag "${IAST_PY_TAG}" \
+  --platform "${IAST_PLATFORM}" \
+  --print-path)"
+test -n "${AGENT_ARTIFACT}"
+test -s "${AGENT_ARTIFACT}"
 
 echo "==> Prepare venv and install agent"
 cd "${ROOT}"
@@ -60,7 +59,7 @@ fi
 source venv/bin/activate
 pip install -q -r requirements.txt
 pip install -q -r security/requirements.txt
-pip install -q "${AGENT_WHL}"
+pip install -q "${AGENT_ARTIFACT}"
 
 echo "==> Start Benchmark with Immunity Python agent"
 export IMMUNITY_IAST=1
@@ -93,6 +92,7 @@ echo "==> Score IAST vs OWASP Benchmark"
 export PANEL_URL="${PANEL_URL:-${IAST_SERVER_URL}}"
 export PROJECT_VERSION="${VERSION}"
 python3 "${ROOT}/security/score_iast_benchmark.py" \
+  --agent-artifact "${AGENT_ARTIFACT}" \
   --output-json "${ROOT}/scorecard-iast.json" \
   --output-md "${ROOT}/scorecard-iast.md"
 

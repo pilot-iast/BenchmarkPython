@@ -1,15 +1,15 @@
 #!/bin/sh
-# Start OWASP Benchmark for Python with Immunity IAST agent (iast-tool/agent.whl).
+# Start OWASP Benchmark for Python with Immunity IAST agent (iast-tool/*.whl or *.tar.gz).
 # Download agent first — see security/local-debug.sh or CI workflow.
 
 set -e
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-AGENT="${ROOT}/iast-tool/agent.whl"
+AGENT="$(find "${ROOT}/iast-tool" -maxdepth 1 \( -name '*.whl' -o -name '*.tar.gz' \) | head -n 1)"
 
-if [ ! -s "$AGENT" ]; then
-  echo "Missing ${AGENT}"
-  echo "Run security/local-debug.sh or download agent from management-server into iast-tool/agent.whl"
+if [ -z "$AGENT" ] || [ ! -s "$AGENT" ]; then
+  echo "Missing agent artifact in ${ROOT}/iast-tool/"
+  echo "Run security/local-debug.sh or download agent from management-server first"
   exit 1
 fi
 

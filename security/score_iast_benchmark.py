@@ -341,8 +341,8 @@ def main() -> int:
     parser.add_argument("--project-version", default="")
     parser.add_argument(
         "--agent-artifact",
-        default=str(root / "iast-tool" / "agent.whl"),
-        help="Python agent wheel (or Java agent.jar) for project name/version fallback",
+        default=str(root / "iast-tool"),
+        help="Python agent wheel/tar.gz (or directory containing one) for project name/version fallback",
     )
     parser.add_argument(
         "--expected",

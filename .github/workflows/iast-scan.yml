@@ -43,26 +43,15 @@ jobs:
           version="${PROJECT_VERSION}"
           echo "PROJECT_VERSION=${version}" >> "${GITHUB_ENV}"
           echo "IAST_PROJECT_NAME=${project}" >> "${GITHUB_ENV}"
-          mkdir -p iast-tool
-          curl -fsSk -G \
-            -H "Authorization: Token ${IAST_TOKEN}" \
-            --data-urlencode "url=${server}" \
-            --data-urlencode "language=python" \
-            --data-urlencode "projectName=${project}" \
-            --data-urlencode "projectVersion=${version}" \
-            --data-urlencode "template_id=${template_id}" \
-            --data-urlencode "py=${py_tag}" \
-            --data-urlencode "platform=${platform}" \
-            "${server}/api/v1/agent/download" \
-            -o iast-tool/agent.whl
-          ls -lh iast-tool/agent.whl
-          test -s iast-tool/agent.whl
-          python3 -c "
-          import json, zipfile
-          z = zipfile.ZipFile('iast-tool/agent.whl')
-          cfg = [n for n in z.namelist() if n.endswith('config.json')][0]
-          print(json.dumps(json.loads(z.read(cfg)), indent=2))
-          "
+          python3 security/download_agent.py \
+            --server "${server}" \
+            --token "${IAST_TOKEN}" \
+            --project-name "${project}" \
+            --project-version "${version}" \
+            --template-id "${template_id}" \
+            --py-tag "${py_tag}" \
+            --platform "${platform}" \
+            --github-env "${GITHUB_ENV}"
 
       - name: Install Python dependencies
         run: |
@@ -71,7 +60,7 @@ jobs:
           # shellcheck disable=SC1091
           source venv/bin/activate
           pip install -q -r requirements.txt -r security/requirements.txt
-          pip install -q ./iast-tool/agent.whl
+          pip install -q "${AGENT_ARTIFACT}"
 
       - name: Start Benchmark with IAST agent
         run: |
@@ -102,7 +91,7 @@ jobs:
       - name: Verify IAST agent started
         run: |
           set -euo pipefail
-          test -s iast-tool/agent.whl
+          test -s "${AGENT_ARTIFACT}"
           if ! grep -qi 'immunity\|python.agent\|ImmunityFlaskMiddleware' benchmark-server.log; then
             echo "WARNING: no obvious agent log lines yet; continuing"
           fi
@@ -144,6 +133,7 @@ jobs:
             exit 1
           fi
           python3 security/score_iast_benchmark.py \
+            --agent-artifact "${AGENT_ARTIFACT}" \
             --output-json scorecard-iast.json \
             --output-md scorecard-iast.md
           test -s scorecard-iast.json

@@ -225,10 +225,21 @@ def _flatten_config(config: dict) -> dict[str, str]:
     return flat
 
 
-def read_agent_properties(agent_artifact: str) -> dict[str, str]:
-    """Read project metadata from a Java agent.jar or Python agent.whl."""
+def _resolve_agent_artifact(agent_artifact: str) -> Path | None:
     path = Path(agent_artifact)
-    if not path.is_file():
+    if path.is_file():
+        return path
+    if path.is_dir():
+        candidates = sorted(path.glob("*.whl")) + sorted(path.glob("*.tar.gz"))
+        if candidates:
+            return candidates[-1]
+    return None
+
+
+def read_agent_properties(agent_artifact: str) -> dict[str, str]:
+    """Read project metadata from a Java agent.jar or Python agent wheel/sdist."""
+    path = _resolve_agent_artifact(agent_artifact)
+    if path is None:
         return {}
 
     if path.suffix == ".whl":
@@ -238,7 +249,22 @@ def read_agent_properties(agent_artifact: str) -> dict[str, str]:
                     if name.endswith("immunity_python_agent/config.json"):
                         config = json.loads(zf.read(name).decode("utf-8"))
                         return _flatten_config(config)
-        except (KeyError, OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError, zipfile.BadZipFile):
+            return {}
+
+    if path.suffix == ".gz" or path.name.endswith(".tar.gz"):
+        try:
+            import tarfile
+
+            with tarfile.open(path, "r:gz") as tar:
+                for item in tar.getmembers():
+                    if item.name.endswith("immunity_python_agent/config.json"):
+                        raw = tar.extractfile(item)
+                        if raw is None:
+                            return {}
+                        config = json.loads(raw.read().decode("utf-8"))
+                        return _flatten_config(config)
+        except (OSError, json.JSONDecodeError, tarfile.TarError):
             return {}
 
     if path.suffix == ".jar":
