@@ -15,15 +15,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - python-version: "3.6"
-            runs-on: ubuntu-20.04
-            continue-on-error: true
-          - python-version: "3.7"
-            runs-on: ubuntu-20.04
-            continue-on-error: true
-          - python-version: "3.8"
-            runs-on: ubuntu-20.04
-            continue-on-error: true
           - python-version: "3.9"
             runs-on: ubuntu-latest
             continue-on-error: false
@@ -101,6 +92,7 @@ jobs:
           python3 -m venv venv
           # shellcheck disable=SC1091
           source venv/bin/activate
+          python -m pip install -q -U pip
           pip install -q -r requirements.txt -r security/requirements.txt
           pip install -q "${AGENT_ARTIFACT}"
 
