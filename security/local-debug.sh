@@ -19,13 +19,14 @@ fi
 : "${PANEL_USER:?Set PANEL_USER in security/.env.local}"
 : "${PANEL_PASS:?Set PANEL_PASS in security/.env.local}"
 
-IAST_PROJECT_NAME="${IAST_PROJECT_NAME:-benchmarkpython}"
+IAST_PROJECT_BASE="${IAST_PROJECT_NAME:-benchmarkpython}"
 IAST_TEMPLATE_ID="${IAST_TEMPLATE_ID:-2}"
 PY_VERSION="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+IAST_PROJECT_NAME="${IAST_PROJECT_BASE}-py${PY_VERSION}"
 IAST_PY_TAG="${IAST_PY_TAG:-cp${PY_VERSION//./}}"
 IAST_PLATFORM="${IAST_PLATFORM:-manylinux_2_28_x86_64}"
 BENCHMARK_BASE_URL="${BENCHMARK_BASE_URL:-https://127.0.0.1:8443/benchmark}"
-VERSION="local-$(date +%s)-py${PY_VERSION}"
+VERSION="local-$(date +%s)"
 SERVER="${IAST_SERVER_URL%/}"
 
 cleanup() {

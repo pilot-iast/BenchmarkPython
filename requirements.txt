@@ -1,5 +1,5 @@
 # Runtime deps for OWASP BenchmarkPython.
-# Unpinned on purpose: CI matrix runs Python 3.9–3.14; pip picks compatible releases.
+# Unpinned on purpose: CI matrix runs Python 3.12–3.13; pip picks compatible releases.
 Flask
 ldap3
 lxml

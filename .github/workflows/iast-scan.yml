@@ -15,24 +15,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - python-version: "3.9"
-            runs-on: ubuntu-latest
-            continue-on-error: false
-          - python-version: "3.10"
-            runs-on: ubuntu-latest
-            continue-on-error: false
-          - python-version: "3.11"
-            runs-on: ubuntu-latest
-            continue-on-error: false
           - python-version: "3.12"
             runs-on: ubuntu-latest
             continue-on-error: false
           - python-version: "3.13"
             runs-on: ubuntu-latest
             continue-on-error: false
-          - python-version: "3.14"
-            runs-on: ubuntu-latest
-            continue-on-error: true
 
     steps:
       - name: Checkout
@@ -47,18 +35,25 @@ jobs:
             requirements.txt
             security/requirements.txt
 
-      - name: Resolve agent wheel tag and project version
+      - name: Resolve agent wheel tag and project name
         id: agent_meta
         run: |
           set -euo pipefail
           py="${{ matrix.python-version }}"
           py_tag="cp${py//./}"
-          project_version="run-${{ github.run_number }}-py${py}"
+          base_project="${{ vars.IAST_PROJECT_NAME }}"
+          if [ -z "${base_project}" ]; then
+            base_project="benchmarkpython"
+          fi
+          project_name="${base_project}-py${py}"
+          project_version="run-${{ github.run_number }}"
           echo "py_tag=${py_tag}" >> "${GITHUB_OUTPUT}"
+          echo "project_name=${project_name}" >> "${GITHUB_OUTPUT}"
           echo "project_version=${project_version}" >> "${GITHUB_OUTPUT}"
           echo "IAST_PY_TAG=${py_tag}" >> "${GITHUB_ENV}"
+          echo "IAST_PROJECT_NAME=${project_name}" >> "${GITHUB_ENV}"
           echo "PROJECT_VERSION=${project_version}" >> "${GITHUB_ENV}"
-          echo "Using project version ${project_version} (wheel tag ${py_tag})"
+          echo "Using project ${project_name} version ${project_version} (wheel tag ${py_tag})"
 
       - name: Download IAST Python agent
         env:
@@ -72,14 +67,12 @@ jobs:
           test -n "${IAST_SERVER_URL:-}" || { echo "IAST_SERVER_URL secret is required"; exit 1; }
           test -n "${IAST_TOKEN:-}" || { echo "IAST_TOKEN secret is required"; exit 1; }
           server="${IAST_SERVER_URL%/}"
-          project="${IAST_PROJECT_NAME:-benchmarkpython}"
           template_id="${IAST_TEMPLATE_ID:-2}"
           platform="${IAST_PLATFORM:-manylinux_2_28_x86_64}"
-          echo "IAST_PROJECT_NAME=${project}" >> "${GITHUB_ENV}"
           python3 security/download_agent.py \
             --server "${server}" \
             --token "${IAST_TOKEN}" \
-            --project-name "${project}" \
+            --project-name "${IAST_PROJECT_NAME}" \
             --project-version "${PROJECT_VERSION}" \
             --template-id "${template_id}" \
             --py-tag "${IAST_PY_TAG}" \
@@ -172,7 +165,6 @@ jobs:
           # shellcheck disable=SC1091
           source venv/bin/activate
           export PANEL_URL="${PANEL_URL:-${IAST_SERVER_URL:-}}"
-          export IAST_PROJECT_NAME="${IAST_PROJECT_NAME:-benchmarkpython}"
           if [ -z "${PANEL_URL:-}" ] || [ -z "${PANEL_USER:-}" ] || [ -z "${PANEL_PASS:-}" ]; then
             echo "PANEL_URL (or IAST_SERVER_URL), PANEL_USER, PANEL_PASS are required for scorecard" >&2
             exit 1
