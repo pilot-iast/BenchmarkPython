@@ -59,7 +59,6 @@ jobs:
         env:
           IAST_SERVER_URL: ${{ secrets.IAST_SERVER_URL }}
           IAST_TOKEN: ${{ secrets.IAST_TOKEN }}
-          IAST_PROJECT_NAME: ${{ vars.IAST_PROJECT_NAME }}
           IAST_TEMPLATE_ID: ${{ vars.IAST_TEMPLATE_ID }}
           IAST_PLATFORM: ${{ vars.IAST_PLATFORM }}
         run: |
@@ -69,11 +68,14 @@ jobs:
           server="${IAST_SERVER_URL%/}"
           template_id="${IAST_TEMPLATE_ID:-2}"
           platform="${IAST_PLATFORM:-manylinux_2_28_x86_64}"
+          project_name="${{ steps.agent_meta.outputs.project_name }}"
+          project_version="${{ steps.agent_meta.outputs.project_version }}"
+          echo "Downloading agent for project=${project_name} version=${project_version}"
           python3 security/download_agent.py \
             --server "${server}" \
             --token "${IAST_TOKEN}" \
-            --project-name "${IAST_PROJECT_NAME}" \
-            --project-version "${PROJECT_VERSION}" \
+            --project-name "${project_name}" \
+            --project-version "${project_version}" \
             --template-id "${template_id}" \
             --py-tag "${IAST_PY_TAG}" \
             --platform "${platform}" \
@@ -157,8 +159,8 @@ jobs:
           PANEL_USER: ${{ secrets.PANEL_USER }}
           PANEL_PASS: ${{ secrets.PANEL_PASS }}
           IAST_SERVER_URL: ${{ secrets.IAST_SERVER_URL }}
-          IAST_PROJECT_NAME: ${{ env.IAST_PROJECT_NAME }}
-          PROJECT_VERSION: ${{ env.PROJECT_VERSION }}
+          IAST_PROJECT_NAME: ${{ steps.agent_meta.outputs.project_name }}
+          PROJECT_VERSION: ${{ steps.agent_meta.outputs.project_version }}
           PANEL_VERIFY_SSL: "false"
         run: |
           set -euo pipefail
@@ -171,7 +173,8 @@ jobs:
           fi
           python3 security/score_iast_benchmark.py \
             --agent-artifact "${AGENT_ARTIFACT}" \
-            --project-version "${PROJECT_VERSION}" \
+            --project-name "${{ steps.agent_meta.outputs.project_name }}" \
+            --project-version "${{ steps.agent_meta.outputs.project_version }}" \
             --vuln-scope version \
             --output-json "scorecard-iast-py${{ matrix.python-version }}.json" \
             --output-md "scorecard-iast-py${{ matrix.python-version }}.md"
