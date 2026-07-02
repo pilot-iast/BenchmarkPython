@@ -7,20 +7,67 @@ on:
 
 jobs:
   iast-crawl:
-    runs-on: ubuntu-latest
+    name: py${{ matrix.python-version }}
+    runs-on: ${{ matrix.runs-on }}
     timeout-minutes: 150
+    continue-on-error: ${{ matrix.continue-on-error }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python-version: "3.6"
+            runs-on: ubuntu-20.04
+            continue-on-error: true
+          - python-version: "3.7"
+            runs-on: ubuntu-20.04
+            continue-on-error: true
+          - python-version: "3.8"
+            runs-on: ubuntu-20.04
+            continue-on-error: true
+          - python-version: "3.9"
+            runs-on: ubuntu-latest
+            continue-on-error: false
+          - python-version: "3.10"
+            runs-on: ubuntu-latest
+            continue-on-error: false
+          - python-version: "3.11"
+            runs-on: ubuntu-latest
+            continue-on-error: false
+          - python-version: "3.12"
+            runs-on: ubuntu-latest
+            continue-on-error: false
+          - python-version: "3.13"
+            runs-on: ubuntu-latest
+            continue-on-error: false
+          - python-version: "3.14"
+            runs-on: ubuntu-latest
+            continue-on-error: true
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.12
+      - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
           cache: pip
           cache-dependency-path: |
             requirements.txt
             security/requirements.txt
+
+      - name: Resolve agent wheel tag and project version
+        id: agent_meta
+        run: |
+          set -euo pipefail
+          py="${{ matrix.python-version }}"
+          py_tag="cp${py//./}"
+          project_version="run-${{ github.run_number }}-py${py}"
+          echo "py_tag=${py_tag}" >> "${GITHUB_OUTPUT}"
+          echo "project_version=${project_version}" >> "${GITHUB_OUTPUT}"
+          echo "IAST_PY_TAG=${py_tag}" >> "${GITHUB_ENV}"
+          echo "PROJECT_VERSION=${project_version}" >> "${GITHUB_ENV}"
+          echo "Using project version ${project_version} (wheel tag ${py_tag})"
 
       - name: Download IAST Python agent
         env:
@@ -28,9 +75,7 @@ jobs:
           IAST_TOKEN: ${{ secrets.IAST_TOKEN }}
           IAST_PROJECT_NAME: ${{ vars.IAST_PROJECT_NAME }}
           IAST_TEMPLATE_ID: ${{ vars.IAST_TEMPLATE_ID }}
-          IAST_PY_TAG: ${{ vars.IAST_PY_TAG }}
           IAST_PLATFORM: ${{ vars.IAST_PLATFORM }}
-          PROJECT_VERSION: run-${{ github.run_number }}
         run: |
           set -euo pipefail
           test -n "${IAST_SERVER_URL:-}" || { echo "IAST_SERVER_URL secret is required"; exit 1; }
@@ -38,18 +83,15 @@ jobs:
           server="${IAST_SERVER_URL%/}"
           project="${IAST_PROJECT_NAME:-benchmarkpython}"
           template_id="${IAST_TEMPLATE_ID:-2}"
-          py_tag="${IAST_PY_TAG:-cp312}"
           platform="${IAST_PLATFORM:-manylinux_2_28_x86_64}"
-          version="${PROJECT_VERSION}"
-          echo "PROJECT_VERSION=${version}" >> "${GITHUB_ENV}"
           echo "IAST_PROJECT_NAME=${project}" >> "${GITHUB_ENV}"
           python3 security/download_agent.py \
             --server "${server}" \
             --token "${IAST_TOKEN}" \
             --project-name "${project}" \
-            --project-version "${version}" \
+            --project-version "${PROJECT_VERSION}" \
             --template-id "${template_id}" \
-            --py-tag "${py_tag}" \
+            --py-tag "${IAST_PY_TAG}" \
             --platform "${platform}" \
             --github-env "${GITHUB_ENV}"
 
@@ -71,7 +113,7 @@ jobs:
           nohup flask --app app.py run --port 8443 --cert=adhoc --host=127.0.0.1 \
             > benchmark-server.log 2>&1 &
           echo $! > benchmark-server.pid
-          echo "Started Flask (pid $(cat benchmark-server.pid))"
+          echo "Started Flask (pid $(cat benchmark-server.pid)) on Python ${{ matrix.python-version }}"
 
       - name: Wait for application
         run: |
@@ -82,7 +124,6 @@ jobs:
               tail -n 200 benchmark-server.log || true
               exit 1
             fi
-            # /benchmark/ returns 404 on Flask; use a route that always returns 200.
             if curl -kfsS "https://127.0.0.1:8443/redirected" >/dev/null 2>&1; then
               echo "Benchmark is up after ${attempt} attempt(s)"
               exit 0
@@ -146,26 +187,27 @@ jobs:
           fi
           python3 security/score_iast_benchmark.py \
             --agent-artifact "${AGENT_ARTIFACT}" \
+            --project-version "${PROJECT_VERSION}" \
             --vuln-scope version \
-            --output-json scorecard-iast.json \
-            --output-md scorecard-iast.md
-          test -s scorecard-iast.json
-          test -s scorecard-iast.md
+            --output-json "scorecard-iast-py${{ matrix.python-version }}.json" \
+            --output-md "scorecard-iast-py${{ matrix.python-version }}.md"
+          test -s "scorecard-iast-py${{ matrix.python-version }}.json"
+          test -s "scorecard-iast-py${{ matrix.python-version }}.md"
 
       - name: Upload scorecard
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: scorecard-iast
+          name: scorecard-iast-py${{ matrix.python-version }}
           path: |
-            scorecard-iast.json
-            scorecard-iast.md
+            scorecard-iast-py${{ matrix.python-version }}.json
+            scorecard-iast-py${{ matrix.python-version }}.md
 
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: iast-scan-logs
+          name: iast-scan-logs-py${{ matrix.python-version }}
           path: |
             benchmark-server.log
             crawl-failures.tsv
