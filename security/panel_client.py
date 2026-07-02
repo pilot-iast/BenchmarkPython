@@ -371,6 +371,14 @@ def fetch_all_vulnerabilities(
             if vulns:
                 meta["scope"] = scope
                 return vulns, meta
+        except requests.HTTPError as exc:
+            body = ""
+            if exc.response is not None:
+                body = (exc.response.text or "")[:500]
+            print(
+                f"WARNING: v2 vulnerability fetch HTTP {getattr(exc.response, 'status_code', '?')} "
+                f"({body!r}); falling back to v1"
+            )
         except RuntimeError as exc:
             print(f"WARNING: v2 vulnerability fetch failed ({exc}); falling back to v1")
 
