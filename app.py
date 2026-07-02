@@ -50,9 +50,5 @@ def default_page():
 def redirected():
 	return 'you\'ve been pwned'
 
-if os.environ.get('IMMUNITY_IAST', '').lower() in ('1', 'true', 'yes'):
-	from immunity_python_agent.middlewares.flask_middleware import ImmunityFlaskMiddleware
-	app.wsgi_app = ImmunityFlaskMiddleware(app.wsgi_app, app)
-
 if __name__ == '__main__':
 	app.run()

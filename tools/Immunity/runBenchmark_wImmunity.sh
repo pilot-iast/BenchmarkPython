@@ -24,8 +24,8 @@ fi
 pip install -q -r requirements.txt
 pip install -q "${AGENT}"
 
-export IMMUNITY_IAST=1
+export IMMUNITY_CTL_SKIP_UPDATE=1
 echo "Starting Benchmark for Python with Immunity IAST agent: ${AGENT}"
 echo "When Flask is up, run ./runCrawler.sh in another terminal."
 echo "Press Ctrl+C here to stop the server."
-exec flask --app app.py run --port 8443 --cert=adhoc --host=127.0.0.1
+exec immunity-agent run flask --app app.py run --port 8443 --cert=adhoc --host=127.0.0.1

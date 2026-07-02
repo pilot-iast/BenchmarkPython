@@ -96,11 +96,11 @@ jobs:
           set -euo pipefail
           # shellcheck disable=SC1091
           source venv/bin/activate
-          export IMMUNITY_IAST=1
-          nohup flask --app app.py run --port 8443 --cert=adhoc --host=127.0.0.1 \
+          export IMMUNITY_CTL_SKIP_UPDATE=1
+          nohup immunity-agent run flask --app app.py run --port 8443 --cert=adhoc --host=127.0.0.1 \
             > benchmark-server.log 2>&1 &
           echo $! > benchmark-server.pid
-          echo "Started Flask (pid $(cat benchmark-server.pid)) on Python ${{ matrix.python-version }}"
+          echo "Started Flask via immunity-agent run (pid $(cat benchmark-server.pid)) on Python ${{ matrix.python-version }}"
 
       - name: Wait for application
         run: |
@@ -130,7 +130,7 @@ jobs:
         run: |
           set -euo pipefail
           test -s "${AGENT_ARTIFACT}"
-          if ! grep -qi 'immunity\|python.agent\|ImmunityFlaskMiddleware' benchmark-server.log; then
+          if ! grep -qi 'immunity-loader\|automatic flask middleware\|immunity-agent\|agent register' benchmark-server.log; then
             echo "WARNING: no obvious agent log lines yet; continuing"
           fi
           echo "Giving agent 30s to register with panel..."

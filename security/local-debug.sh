@@ -63,9 +63,9 @@ pip install -q -r requirements.txt
 pip install -q -r security/requirements.txt
 pip install -q "${AGENT_ARTIFACT}"
 
-echo "==> Start Benchmark with Immunity Python agent"
-export IMMUNITY_IAST=1
-nohup flask --app app.py run --port 8443 --cert=adhoc --host=127.0.0.1 \
+echo "==> Start Benchmark with Immunity Python agent (non-invasive)"
+export IMMUNITY_CTL_SKIP_UPDATE=1
+nohup immunity-agent run flask --app app.py run --port 8443 --cert=adhoc --host=127.0.0.1 \
   > "${SERVER_LOG}" 2>&1 &
 echo $! > "${SERVER_PID}"
 
@@ -87,7 +87,7 @@ curl -kfsS "https://127.0.0.1:8443/redirected" >/dev/null
 
 echo "==> Agent started; wait 30s for panel registration"
 sleep 30
-grep -i 'immunity\|agent' "${SERVER_LOG}" | tail -20 || true
+grep -i 'immunity-loader\|automatic flask middleware\|agent register' "${SERVER_LOG}" | tail -20 || true
 
 echo "==> Crawl"
 python3 security/run_crawler.py --base-url "https://127.0.0.1:8443"
