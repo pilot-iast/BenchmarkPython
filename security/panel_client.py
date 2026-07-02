@@ -349,6 +349,19 @@ def fetch_panel_vulnerability_summary(
     return {}
 
 
+def summarize_panel_hook_types(summary: dict) -> dict[str, int]:
+    """Flatten app_vul_summary hook_type rows into {strategy_name: count}."""
+    counts: dict[str, int] = {}
+    for row in summary.get("hook_type") or []:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or "").strip()
+        if not name:
+            continue
+        counts[name] = int(row.get("num") or 0)
+    return counts
+
+
 def fetch_all_vulnerabilities(
     session: requests.Session,
     base_url: str,
