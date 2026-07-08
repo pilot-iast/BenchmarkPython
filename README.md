@@ -1,17 +1,100 @@
-# OWASP Benchmark for Python
-The OWASP Benchmark Project is a Python test suite designed to verify the speed and accuracy of vulnerability detection tools. It is a fully runnable open source web application that can be analyzed by any type of Application Security Testing (AST) tool, including SAST, DAST (like <a href="https://www.zaproxy.org/">ZAP</a>), and IAST tools. The intent is that all the vulnerabilities deliberately included in and scored by the Benchmark are actually exploitable so it's a fair test for any kind of application vulnerability detection tool.
+# Результаты проверки Immunity IAST на OWASP Benchmark for Python
 
-The Benchmark project also includes scorecard generators for numerous open source and commercial AST tools, and the set of supported tools is growing all the time. This scoring capability is implemented in the BenchmarkUtils project, which is at: https://github.com/OWASP/BenchmarkUtils.
+**Продукт:** Immunity IAST  
+**Объект проверки:** OWASP Benchmark for Python v0.1  
+**Дата:** 08.07.2026  
+**Методика:** автоматизированный обход эталонного набора тестов (crawler) с последующим сопоставлением находок с ground truth
 
-The project documentation is all on the OWASP site at the <a href="https://owasp.org/www-project-benchmark">OWASP Benchmark</a> project pages. Please refer to that site for all the project details.
+---
 
-This is a preliminary initial release we are calling v0.1. Over the next several months we plan to improve/upgrade this project to get to a full v1.0 release when we have sufficient vulnerability coverage implemented.
+## 1. Назначение документа
 
-Note that all the releases that are available here: https://github.com/OWASP/BenchmarkPython/releases, are historical. The latest release is always available live by simply cloning or pulling the head of this repository (i.e., git pull).
+Документ фиксирует результаты функциональной проверки Immunity IAST на эталонном наборе OWASP Benchmark for Python. Отчёт предназначен для оценки готовности решения к промышленному использованию: подключение Flask-приложения, сбор телеметрии, регистрация уязвимостей и компонентов на управляющем сервере.
 
-Running Benchmark Itself:
-* runBenchmark.sh - run the Benchmark Python Web Application (accessible via local machine only)
-* runRemoteAccessibleBenchmark.sh - like the above but allows port 8443 to be accessible outside the machine the Python Benchmark is running on.
+---
 
-ACKNOWLEDGEMENTS:
-The OWASP Benchmark project would like to thank the contributions of AppSecAI (https://www.appsecai.io) and their team members Theo Cartsonis and Jessica Salawu for doing the bulk of the development work to produce this first release of the Benchmark for Python test suite.
+## 2. Механизм инструментирования
+
+Immunity IAST подключается к приложению **без изменения исходного кода**. Достаточно изменить команду запуска: утилита `immunity-agent run` оборачивает исходную команду и активирует Python-агент.
+
+| | Команда запуска |
+| --- | --- |
+| **Без агента** (исходная) | `flask --app app.py run --debug --port 8443 --cert=adhoc` |
+| **С агентом Immunity IAST** | `immunity-agent run flask --app app.py run --port 8443 --cert=adhoc --host=127.0.0.1` |
+
+Перед запуском с агентом устанавливается пакет агента, полученный с управляющего сервера:
+
+```bash
+python3 -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+pip install ./iast-tool/immunity_python_agent-*.whl
+export IMMUNITY_CTL_SKIP_UPDATE=1
+immunity-agent run flask --app app.py run --port 8443 --cert=adhoc --host=127.0.0.1
+```
+
+**Принцип работы:** утилита `immunity-agent run` принимает исходную команду запуска приложения как аргументы, подключает Python-агент при старте интерпретатора, активирует middleware Flask и отправляет пулы вызовов и сведения о компонентах на сервер.
+
+---
+
+## 3. Параметры тестирования
+
+| Параметр | Значение |
+| --- | --- |
+| Язык программирования | Python |
+| Протестированные версии | 3.12, 3.13 |
+| Фреймворк | Flask |
+| Версия прогона | `run-6` |
+| Эталон | 1230 тестовых сценариев (452 уязвимых, 778 безопасных) |
+
+---
+
+## 4. Контрольные показатели (KPI)
+
+| Критерий | Статус |
+| --- | --- |
+| Успешный вход под токеном | ☑ |
+| Подключение тестового приложения | ☑ |
+| Передача данных агентом на управляющий сервер | ☑ |
+| Регистрация уязвимостей веб-приложения | ☑ |
+| Регистрация компонентов приложения | ☑ |
+| Регистрация уязвимостей компонентов | ☐ |
+| Регистрация маршрутов | ☑ |
+
+---
+
+## 5. Обнаружение заложенных уязвимостей
+
+В ячейках указано: **число обнаруженных уязвимых тестов / число заложенных уязвимых тестов** в категории.
+
+| Тип уязвимости | Python 3.12 | Python 3.13 |
+| --- | ---: | ---: |
+| LDAP-инъекция | 0/16 | 0/16 |
+| SQL-инъекция | 4/5 | 0/5 |
+| XPath-инъекция | 41/51 | 51/51 |
+| XXE | 5/8 | 6/8 |
+| Выполнение кода | 7/20 | 14/20 |
+| Выполнение команд | 8/13 | 0/13 |
+| Граница доверия | 18/18 | 18/18 |
+| Межсайтовый скриптинг (XSS) | 8/31 | 1/31 |
+| Небезопасная десериализация | 1/18 | 2/18 |
+| Небезопасное перенаправление | 4/13 | 6/13 |
+| Небезопасные cookie | 24/24 | 24/24 |
+| Обход пути | 16/65 | 0/65 |
+| Слабый генератор случайных чисел | 99/99 | 99/99 |
+| Слабый хеш | 71/71 | 71/71 |
+| **Полнота (Recall), %** | **67,70** | **64,60** |
+
+| Версия Python | Полнота | Точность | Доля ложных срабатываний |
+| ---: | ---: | ---: | ---: |
+| 3.12 | 67,70% | 72,00% | 15,30% |
+| 3.13 | 64,60% | 66,51% | 18,89% |
+
+---
+
+## 6. Выводы
+
+Immunity IAST подключается к Flask-приложению одной заменой команды запуска (`immunity-agent run …`). Все базовые KPI, кроме уязвимостей компонентов, выполнены.
+
+Полнота обнаружения заложенных уязвимостей — **64,6–67,7%**. Наилучше детектируются категории с прямым вызовом опасных API (слабый хеш, слабый ГСЧ, cookie). Категории с длинными цепочками передачи данных (обход пути, XSS, LDAP) требуют доработки.
+
+Immunity IAST проходит эталонную проверку OWASP Benchmark for Python с удовлетворительной полнотой при полностью рабочем конвейере сбора и анализа данных.
